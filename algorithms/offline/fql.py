@@ -231,7 +231,7 @@ class FlowPolicy(nn.Module):
         hidden_dim: int, 
         max_action: float = 1.0,
         time_dim: int = 32, 
-        n_steps: int = 50
+        n_steps: int = 10
         ):
         super().__init__()
         self.n_steps = n_steps
@@ -392,6 +392,7 @@ class OneStepFlowPolicy(nn.Module):
         vel = self.vel_head(hidden)
         z = torch.randn(state.size(0), self.action_dim, device=state.device)
         vel = vel + z
+        vel = torch.tanh(vel)
 
         # # clipping params from EDAC paper, not as in SAC paper (-20, 2)
         # log_sigma = torch.clip(log_sigma, -5, 2)
@@ -475,7 +476,7 @@ class FQL:
         tau: float = 0.005,
         # alpha_learning_rate: float = 1e-4,
         device: str = "cpu",
-        distill_coef: float = 0.1,
+        distill_coef: float = 200,
     ):
         self.device = device
 
@@ -538,11 +539,12 @@ class FQL:
         # needed for logging
         q_value_std = q_value_dist.std(0).mean().item()
         # batch_entropy = -action_log_prob.mean().item()
+        distill_loss = self.distill_coef * self._distill_loss(state)
 
         # assert action_log_prob.shape == q_value_min.shape
-        loss = (- q_value_min).mean() + self.distill_coef * self._distill_loss(state)
+        loss = (- q_value_min).mean() + distill_loss
 
-        return loss, q_value_std
+        return loss, q_value_std, distill_loss.item()
 
     def _critic_loss(
         self,
@@ -587,7 +589,7 @@ class FQL:
         self.flowpolicy_optimizer.step()
 
         # Actor update
-        actor_loss, q_policy_std = self._actor_loss(state)
+        actor_loss, q_policy_std, distill_loss = self._actor_loss(state)
         self.actor_optimizer.zero_grad()
         actor_loss.backward()
         self.actor_optimizer.step()
@@ -608,6 +610,14 @@ class FQL:
 
             q_random_std = self.critic(state, random_actions).std(0).mean().item()
 
+            # log flow action & onestep action & q_target
+            flow_action = self.flowpolicy.Euler(state).detach().cpu()
+            onestep_action = self.actor(state).detach().cpu()
+            next_action = self.actor(next_state)
+            q_next = self.target_critic(next_state, next_action).min(0).values
+            q_target = reward + self.gamma * (1 - done) * q_next.unsqueeze(-1)
+            distill_loss = F.mse_loss(flow_action, onestep_action) * self.distill_coef
+
         update_info = {
             # "alpha_loss": alpha_loss.item(),
             "flow_loss": flow_loss.item(),
@@ -617,6 +627,13 @@ class FQL:
             # "alpha": self.alpha.item(),
             "q_policy_std": q_policy_std,
             "q_random_std": q_random_std,
+            # --- new logs ---
+            "flow_action/mean": flow_action.mean().item(),
+            "flow_action/std": flow_action.std().item(),
+            "onestep_action/mean": onestep_action.mean().item(),
+            "onestep_action/std": onestep_action.std().item(),
+            "distill_loss": distill_loss.item(),
+            "q_target/mean": q_target.mean().item(),
         }
         return update_info
 
@@ -738,7 +755,7 @@ def train(config: TrainConfig):
         critic_optimizer=critic_optimizer,
         flowpolicy = flowpolicy,
         flowpolicy_optimizer = flowpolicy_optimizer,
-        distill_coef = 0.1,  
+        distill_coef = 200,  
         gamma=config.gamma,
         tau=config.tau,
         # alpha_learning_rate=config.alpha_learning_rate,

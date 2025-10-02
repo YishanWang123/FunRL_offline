@@ -1,7 +1,7 @@
 #!bin/bash
-python algorithms/offline/fql.py \
+python algorithms/offline/sac_n.py \
     --project="CORL-Testing" \
     --group="FQL-Test" \
-    --name="FQL-testing-medium-alpha200-flow10-run" \
+    --name="sac-testing-run" \
     --env_name="halfcheetah-medium-v2" \
     --device="cuda:0"
